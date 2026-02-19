@@ -1,0 +1,501 @@
+// This Pine Script® code is subject to the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BullPower Algo Pro — Elite Edition
+
+//@version=5
+strategy(
+     title               = "BullPower Algo Pro — Elite",
+     shorttitle          = "BULLPOWER PRO",
+     overlay             = true,
+     max_bars_back        = 500,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 10,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.05,
+     slippage            = 2,
+     calc_on_every_tick  = false,
+     process_orders_on_close = false
+)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Trend EMAs ──────────────────────────────────────────────────────────
+var string G_TREND = "📈 Trend Settings"
+emaFastLen   = input.int(21,   "Fast EMA",   group=G_TREND, minval=5,  tooltip="Controls short-term trend direction (yellow line)")
+emaSlowLen   = input.int(50,   "Slow EMA",   group=G_TREND, minval=10, tooltip="Controls mid-term trend direction (orange line)")
+emaTrendLen  = input.int(200,  "Trend EMA",  group=G_TREND, minval=50, tooltip="Primary trend filter (white line). Price must be on correct side.")
+
+// ── Keltner Channel ─────────────────────────────────────────────────────
+var string G_KC = "📊 Keltner Channel"
+kcLen   = input.int(20,    "KC Length",     group=G_KC, minval=5)
+kcMult  = input.float(2.0, "KC Multiplier", group=G_KC, step=0.1, minval=0.5, maxval=6.0,
+            tooltip="ATR multiplier for channel width. Higher = fewer but stronger signals.")
+
+// ── RSI ─────────────────────────────────────────────────────────────────
+var string G_RSI = "💹 RSI"
+rsiLen  = input.int(14, "RSI Length",      group=G_RSI, minval=2)
+rsiMid  = input.int(50, "RSI Midline",     group=G_RSI)
+rsiOB   = input.int(70, "RSI Overbought",  group=G_RSI)
+rsiOS   = input.int(30, "RSI Oversold",    group=G_RSI)
+
+// ── Volume ──────────────────────────────────────────────────────────────
+var string G_VOL = "📊 Volume"
+volLen  = input.int(20,    "Volume MA Length",  group=G_VOL, minval=5)
+volMult = input.float(1.2, "Volume Multiplier", group=G_VOL, step=0.1, minval=1.0,
+            tooltip="Minimum volume = volMult × Volume-MA. Filters low-conviction moves.")
+
+// ── Risk Management ─────────────────────────────────────────────────────
+var string G_RISK = "⚡ Risk Management"
+atrLen  = input.int(14,    "ATR Length",       group=G_RISK, minval=1)
+slMult  = input.float(1.5, "SL ATR Multiplier",group=G_RISK, step=0.1, minval=0.3,
+            tooltip="Stop Loss distance = SL_Mult × ATR from entry price.")
+tpMult  = input.float(3.0, "TP ATR Multiplier",group=G_RISK, step=0.1, minval=0.5,
+            tooltip="Take Profit distance = TP_Mult × ATR from entry price.")
+
+// ── Multi-Timeframe ─────────────────────────────────────────────────────
+var string G_MTF = "🔭 Multi-Timeframe"
+useHTF  = input.bool(true,  "Use HTF Filter",  group=G_MTF)
+htfTF   = input.timeframe("240", "HTF Timeframe", group=G_MTF)
+
+// ── Visual ──────────────────────────────────────────────────────────────
+var string G_VIS = "🎨 Visual"
+showChannel     = input.bool(true,  "Show Keltner Channel",  group=G_VIS)
+showEMAs        = input.bool(true,  "Show EMAs",             group=G_VIS)
+showTPSL        = input.bool(true,  "Show TP / SL Lines",    group=G_VIS)
+showScore       = input.bool(true,  "Show Signal Score",     group=G_VIS)
+showBarColor    = input.bool(true,  "Color Bars by Trend",   group=G_VIS)
+showBG          = input.bool(true,  "Trend Background",      group=G_VIS)
+showStats       = input.bool(true,  "Show Stats Table",      group=G_VIS)
+statsTrades     = input.int(200,    "Trades in Stats Window",group=G_VIS, minval=10, maxval=500)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════
+
+// ATR
+atr  = ta.atr(atrLen)
+
+// EMAs
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+
+// Keltner Channel
+kcBasis  = ta.ema(close, kcLen)
+kcUpper  = kcBasis + kcMult * atr
+kcLower  = kcBasis - kcMult * atr
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// Volume
+volMA   = ta.sma(volume, volLen)
+highVol = volume > volMA * volMult
+
+// ── Trend States ────────────────────────────────────────────────────────
+bullTrend = emaFast > emaSlow and emaSlow > emaTrend
+bearTrend = emaFast < emaSlow and emaSlow < emaTrend
+
+// ── HTF Trend ───────────────────────────────────────────────────────────
+[htfEmaFast, htfEmaSlow] = request.security(syminfo.tickerid, htfTF,
+     [ta.ema(close, emaFastLen), ta.ema(close, emaSlowLen)])
+
+htfBull = htfEmaFast > htfEmaSlow
+htfBear = htfEmaFast < htfEmaSlow
+
+// ── Channel Breakouts ───────────────────────────────────────────────────
+breakoutUp   = close > kcUpper and close[1] <= kcUpper[1]  // fresh bullish breakout
+breakoutDown = close < kcLower and close[1] >= kcLower[1]  // fresh bearish breakdown
+
+// ── Momentum ────────────────────────────────────────────────────────────
+rsiRising    = rsi > rsi[2]
+rsiFalling   = rsi < rsi[2]
+rsiBullZone  = rsi > rsiMid and rsi < rsiOB      // momentum up, not overbought
+rsiBearZone  = rsi < rsiMid and rsi > rsiOS      // momentum down, not oversold
+emaAccelBull = emaFast > emaFast[3] and emaSlow > emaSlow[3]
+emaAccelBear = emaFast < emaFast[3] and emaSlow < emaSlow[3]
+
+// ── Candle Context ──────────────────────────────────────────────────────
+// Higher lows / lower highs over 3 bars (momentum confirmation)
+higherLows = low > low[1] and low[1] > low[2]
+lowerHighs = high < high[1] and high[1] < high[2]
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SIGNAL SCORING  (0 – 100)
+// ═══════════════════════════════════════════════════════════════════════
+
+// --- Bull score ---
+bullScore = 0
+bullScore := bullScore + (bullTrend       ? 25 : 0)   // EMA alignment
+bullScore := bullScore + (htfBull         ? 20 : 0)   // HTF confirms
+bullScore := bullScore + (rsiBullZone     ? 20 : 0)   // RSI momentum
+bullScore := bullScore + (rsiRising       ? 10 : 0)   // RSI rising
+bullScore := bullScore + (highVol         ? 15 : 0)   // Volume confirmation
+bullScore := bullScore + (emaAccelBull    ? 10 : 0)   // EMA accelerating up
+
+// --- Bear score ---
+bearScore = 0
+bearScore := bearScore + (bearTrend       ? 25 : 0)
+bearScore := bearScore + (htfBear         ? 20 : 0)
+bearScore := bearScore + (rsiBearZone     ? 20 : 0)
+bearScore := bearScore + (rsiFalling      ? 10 : 0)
+bearScore := bearScore + (highVol         ? 15 : 0)
+bearScore := bearScore + (emaAccelBear    ? 10 : 0)
+
+// Score threshold (must be ≥ this to generate a signal)
+int scoreThreshold = 70
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════
+
+htfOkBull = not useHTF or htfBull
+htfOkBear = not useHTF or htfBear
+
+// Bullish entry: fresh breakout above KC with full confirmation
+buySignal = breakoutUp       and
+            bullTrend        and
+            rsiBullZone      and
+            rsiRising        and
+            highVol          and
+            htfOkBull        and
+            bullScore >= scoreThreshold
+
+// Bearish entry: fresh breakdown below KC with full confirmation
+sellSignal = breakoutDown    and
+             bearTrend       and
+             rsiBearZone     and
+             rsiFalling      and
+             highVol         and
+             htfOkBear       and
+             bearScore >= scoreThreshold
+
+// ═══════════════════════════════════════════════════════════════════════
+//  POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════
+
+var float slLevel   = na
+var float tpLevel   = na
+var float entPrice  = na
+var int   entBar    = na
+
+// ── NEW LONG ────────────────────────────────────────────────────────────
+if buySignal
+    // Reverse existing short + open long in one order
+    strategy.entry("Long", strategy.long, comment="BUY")
+    entPrice := close
+    slLevel  := close - slMult * atr
+    tpLevel  := close + tpMult * atr
+    entBar   := bar_index
+
+// ── NEW SHORT ───────────────────────────────────────────────────────────
+if sellSignal
+    // Reverse existing long + open short in one order
+    strategy.entry("Short", strategy.short, comment="SELL")
+    entPrice := close
+    slLevel  := close + slMult * atr
+    tpLevel  := close - tpMult * atr
+    entBar   := bar_index
+
+// ── EXIT ORDERS (TP / SL — re-applied every bar with stored levels) ─────
+if strategy.position_size > 0
+    strategy.exit("Long TP/SL", "Long",
+         stop    = slLevel,
+         limit   = tpLevel,
+         comment_loss   = "SL Hit",
+         comment_profit = "TP Hit")
+
+if strategy.position_size < 0
+    strategy.exit("Short TP/SL", "Short",
+         stop    = slLevel,
+         limit   = tpLevel,
+         comment_loss   = "SL Hit",
+         comment_profit = "TP Hit")
+
+// Reset state when flat
+if strategy.position_size == 0
+    entPrice := na
+    // Keep slLevel / tpLevel for the last line display, reset on new entry
+
+// ═══════════════════════════════════════════════════════════════════════
+//  VISUAL ELEMENTS
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Bar Colors ──────────────────────────────────────────────────────────
+barColor = showBarColor ?
+     (bullTrend ? color.new(color.lime, 30) :
+      bearTrend ? color.new(color.red,  30) :
+                  color.new(color.gray, 30)) : na
+barcolor(barColor)
+
+// ── Trend Background ────────────────────────────────────────────────────
+bgcolor(showBG and bullTrend ? color.new(color.green, 96) :
+        showBG and bearTrend ? color.new(color.red,   96) : na,
+        title="Trend BG")
+
+// ── EMAs ────────────────────────────────────────────────────────────────
+plot(showEMAs ? emaFast  : na, "EMA Fast",
+     color=bullTrend ? color.yellow : color.new(color.yellow, 70), linewidth=2)
+
+plot(showEMAs ? emaSlow  : na, "EMA Slow",
+     color=bullTrend ? color.new(color.orange,30) : color.new(color.red,30), linewidth=2)
+
+plot(showEMAs ? emaTrend : na, "EMA Trend",
+     color=color.new(color.white, 65), linewidth=1)
+
+// ── Keltner Channel ─────────────────────────────────────────────────────
+kcU = plot(showChannel ? kcUpper : na, "KC Upper",
+     color=color.new(color.cyan, 45), linewidth=1)
+kcL = plot(showChannel ? kcLower : na, "KC Lower",
+     color=color.new(color.cyan, 45), linewidth=1)
+plot(showChannel ? kcBasis : na, "KC Basis",
+     color=color.new(color.cyan, 75), linewidth=1, style=plot.style_circles)
+fill(kcU, kcL, color=color.new(color.cyan, 92), title="KC Fill")
+
+// ── Signal Arrows ───────────────────────────────────────────────────────
+plotshape(buySignal,  title="BUY",
+     style=shape.labelup,   location=location.belowbar,
+     color=color.lime,      textcolor=color.black,
+     text="BUY",            size=size.normal)
+
+plotshape(sellSignal, title="SELL",
+     style=shape.labeldown, location=location.abovebar,
+     color=color.red,       textcolor=color.white,
+     text="SELL",           size=size.normal)
+
+// ── Signal Score Labels ─────────────────────────────────────────────────
+if showScore and buySignal
+    label.new(bar_index, low - atr * 0.6,
+         str.tostring(bullScore) + "%",
+         color=color.new(color.lime, 15),
+         textcolor=color.black,
+         style=label.style_label_up,
+         size=size.small)
+
+if showScore and sellSignal
+    label.new(bar_index, high + atr * 0.6,
+         str.tostring(bearScore) + "%",
+         color=color.new(color.red, 15),
+         textcolor=color.white,
+         style=label.style_label_down,
+         size=size.small)
+
+// ── TP / SL / Entry Lines ───────────────────────────────────────────────
+var line lnTP   = na
+var line lnSL   = na
+var line lnENT  = na
+var label lbTP  = na
+var label lbSL  = na
+var label lbENT = na
+
+if showTPSL
+    bool inTrade = strategy.position_size != 0
+
+    if inTrade and not na(slLevel) and not na(tpLevel)
+        // Delete previous lines / labels
+        line.delete(lnTP)
+        line.delete(lnSL)
+        line.delete(lnENT)
+        label.delete(lbTP)
+        label.delete(lbSL)
+        label.delete(lbENT)
+
+        int s = na(entBar) ? bar_index : entBar
+        int e = bar_index + 35
+
+        // Entry line (white, solid)
+        lnENT := line.new(s, entPrice, e, entPrice,
+             color=color.new(color.white, 20), style=line.style_solid, width=1)
+        lbENT := label.new(e, entPrice,
+             "ENTRY  " + str.tostring(entPrice, format.mintick),
+             color=color.new(color.white, 15),
+             textcolor=color.black,
+             style=label.style_label_left,
+             size=size.small)
+
+        // TP line (green, dashed)
+        lnTP := line.new(s, tpLevel, e, tpLevel,
+             color=color.new(color.lime, 0), style=line.style_dashed, width=2)
+        lbTP := label.new(e, tpLevel,
+             "TP  " + str.tostring(tpLevel, format.mintick),
+             color=color.new(color.lime, 10),
+             textcolor=color.black,
+             style=label.style_label_left,
+             size=size.small)
+
+        // SL line (red, dashed)
+        lnSL := line.new(s, slLevel, e, slLevel,
+             color=color.new(color.red, 0), style=line.style_dashed, width=2)
+        lbSL := label.new(e, slLevel,
+             "SL  " + str.tostring(slLevel, format.mintick),
+             color=color.new(color.red, 10),
+             textcolor=color.white,
+             style=label.style_label_left,
+             size=size.small)
+
+    if not inTrade
+        line.delete(lnTP)
+        line.delete(lnSL)
+        line.delete(lnENT)
+        label.delete(lbTP)
+        label.delete(lbSL)
+        label.delete(lbENT)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  STATISTICS TABLE  (Last N Trades — Win / Loss)
+// ═══════════════════════════════════════════════════════════════════════
+
+var int[] tradeLog = array.new_int(0)   // 1 = win | 0 = loss
+var int   prevClosed = 0
+
+// Capture each newly closed trade
+if strategy.closedtrades > prevClosed
+    int newCount = strategy.closedtrades - prevClosed
+    for i = 0 to newCount - 1
+        int   idx  = strategy.closedtrades - newCount + i
+        float pnl  = strategy.closedtrades.profit(idx)
+        array.push(tradeLog, pnl > 0 ? 1 : 0)
+        if array.size(tradeLog) > statsTrades
+            array.shift(tradeLog)   // keep only last N trades
+    prevClosed := strategy.closedtrades
+
+// Compute stats
+int   total   = array.size(tradeLog)
+int   wins    = 0
+if total > 0
+    for j = 0 to total - 1
+        if array.get(tradeLog, j) == 1
+            wins += 1
+
+int   losses  = total - wins
+float winPct  = total > 0 ? (wins   / total) * 100.0 : 0.0
+float lossPct = total > 0 ? (losses / total) * 100.0 : 0.0
+
+// Win / Loss ratio
+float wlRatio = losses > 0 ? wins / losses :
+                wins   > 0 ? 999.0          : 0.0
+
+// R:R and theoretical expectancy
+float rr          = tpMult / slMult
+float expectancy  = (winPct / 100.0 * rr) - (lossPct / 100.0)
+
+// Net / Max drawdown / Profit factor (from strategy built-ins)
+float netProfit    = strategy.netprofit
+float profitFactor = strategy.grossprofit > 0 and strategy.grossloss != 0 ?
+                     math.abs(strategy.grossprofit / strategy.grossloss) : 0.0
+
+// Current open trade unrealized P&L
+float openPnl = strategy.openprofit
+
+// Position string
+string posStr   = strategy.position_size > 0 ? "▲  LONG"  :
+                  strategy.position_size < 0 ? "▼  SHORT" : "─  FLAT"
+color  posClr   = strategy.position_size > 0 ? color.lime :
+                  strategy.position_size < 0 ? color.red  : color.gray
+
+// Trend string
+string trendStr  = bullTrend ? "BULL" : bearTrend ? "BEAR" : "NEUTRAL"
+color  trendClr  = bullTrend ? color.lime : bearTrend ? color.red : color.gray
+
+// Draw table
+if showStats
+    var table st = table.new(
+         position.top_right, 2, 16,
+         bgcolor      = color.new(color.black, 78),
+         border_color = color.new(color.gray,  55),
+         border_width = 1,
+         frame_color  = color.new(color.cyan,  20),
+         frame_width  = 2)
+
+    // ── Header ──────────────────────────────────────────────────────
+    table.cell(st, 0, 0, "⚡  BULLPOWER PRO",
+         text_color=color.cyan, text_size=size.normal,
+         bgcolor=color.new(color.navy, 55), text_halign=text.align_center)
+    table.cell(st, 1, 0, "Last " + str.tostring(total) + " / " + str.tostring(statsTrades) + " Trades",
+         text_color=color.new(color.cyan, 25), text_size=size.tiny,
+         bgcolor=color.new(color.navy, 55), text_halign=text.align_center)
+
+    // ── Separator ───────────────────────────────────────────────────
+    table.cell(st, 0, 1, "─────────────", text_color=color.new(color.gray,55), text_size=size.tiny)
+    table.cell(st, 1, 1, "─────────────", text_color=color.new(color.gray,55), text_size=size.tiny)
+
+    // ── Trade Count ─────────────────────────────────────────────────
+    table.cell(st, 0, 2, "Total Trades",  text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 2, str.tostring(total), text_color=color.white, text_size=size.small)
+
+    // ── Wins ────────────────────────────────────────────────────────
+    table.cell(st, 0, 3, "✓  Wins",  text_color=color.lime,  text_size=size.small)
+    table.cell(st, 1, 3, str.tostring(wins), text_color=color.lime, text_size=size.small)
+
+    // ── Losses ──────────────────────────────────────────────────────
+    table.cell(st, 0, 4, "✗  Losses", text_color=color.red, text_size=size.small)
+    table.cell(st, 1, 4, str.tostring(losses), text_color=color.red, text_size=size.small)
+
+    // ── Win Rate (big) ───────────────────────────────────────────────
+    color wrClr = winPct >= 60.0 ? color.lime  :
+                  winPct >= 50.0 ? color.yellow : color.red
+    table.cell(st, 0, 5, "Win Rate", text_color=color.yellow, text_size=size.small)
+    table.cell(st, 1, 5, str.tostring(winPct, "#.1") + "%",
+         text_color=wrClr, text_size=size.normal)
+
+    // ── W/L Ratio ───────────────────────────────────────────────────
+    color wlClr = wlRatio >= 1.5 ? color.lime  :
+                  wlRatio >= 1.0 ? color.yellow : color.red
+    table.cell(st, 0, 6, "W/L Ratio", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 6, str.tostring(wlRatio, "#.##") + " : 1",
+         text_color=wlClr, text_size=size.small)
+
+    // ── Risk : Reward ───────────────────────────────────────────────
+    table.cell(st, 0, 7, "Risk : Reward", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 7, "1 : " + str.tostring(rr, "#.#"),
+         text_color=color.aqua, text_size=size.small)
+
+    // ── Expectancy ──────────────────────────────────────────────────
+    table.cell(st, 0, 8, "Expectancy", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 8, str.tostring(expectancy, "#.##") + " R",
+         text_color=expectancy > 0 ? color.lime : color.red, text_size=size.small)
+
+    // ── Separator ───────────────────────────────────────────────────
+    table.cell(st, 0, 9, "─────────────", text_color=color.new(color.gray,55), text_size=size.tiny)
+    table.cell(st, 1, 9, "─────────────", text_color=color.new(color.gray,55), text_size=size.tiny)
+
+    // ── Net Profit ──────────────────────────────────────────────────
+    table.cell(st, 0, 10, "Net P&L", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 10, str.tostring(netProfit, "#.##"),
+         text_color=netProfit >= 0 ? color.lime : color.red, text_size=size.small)
+
+    // ── Profit Factor ───────────────────────────────────────────────
+    table.cell(st, 0, 11, "Profit Factor", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 11, str.tostring(profitFactor, "#.##"),
+         text_color=profitFactor >= 1.5 ? color.lime :
+                    profitFactor >= 1.0 ? color.yellow : color.red,
+         text_size=size.small)
+
+    // ── Open P&L ────────────────────────────────────────────────────
+    table.cell(st, 0, 12, "Open P&L", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 12, str.tostring(openPnl, "#.##"),
+         text_color=openPnl >= 0 ? color.lime : color.red, text_size=size.small)
+
+    // ── Separator ───────────────────────────────────────────────────
+    table.cell(st, 0, 13, "─────────────", text_color=color.new(color.gray,55), text_size=size.tiny)
+    table.cell(st, 1, 13, "─────────────", text_color=color.new(color.gray,55), text_size=size.tiny)
+
+    // ── Position ────────────────────────────────────────────────────
+    table.cell(st, 0, 14, "Position", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 14, posStr, text_color=posClr, text_size=size.small)
+
+    // ── Trend ────────────────────────────────────────────────────────
+    table.cell(st, 0, 15, "Trend", text_color=color.silver, text_size=size.small)
+    table.cell(st, 1, 15, trendStr + "  [" +
+         str.tostring(bullScore) + " / " + str.tostring(bearScore) + "]",
+         text_color=trendClr, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ALERTS
+// ═══════════════════════════════════════════════════════════════════════
+
+alertcondition(buySignal,  "BUY Signal",
+     "BullPower PRO — BUY  | Score: {{plot_0}} | {{ticker}} {{interval}}")
+alertcondition(sellSignal, "SELL Signal",
+     "BullPower PRO — SELL | Score: {{plot_0}} | {{ticker}} {{interval}}")
