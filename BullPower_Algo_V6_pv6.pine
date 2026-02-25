@@ -1,0 +1,746 @@
+// This Pine Script® code is subject to the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BullPower Algo V6 — Deep Strategy Edition | Pine Script v6
+
+//@version=6
+strategy(
+     title               = "BullPower Algo V6 — Deep Strategy",
+     shorttitle          = "BULLPOWER V6",
+     overlay             = true,
+     max_bars_back        = 500,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 10,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.05,
+     slippage            = 2,
+     calc_on_every_tick  = false,
+     process_orders_on_close = false
+)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  INPUT GROUPS
+// ═══════════════════════════════════════════════════════════════════════════
+
+const string G_EMA  = "📈 EMA Trend System"
+const string G_KC   = "📊 Keltner Channel"
+const string G_MACD = "📉 MACD"
+const string G_RSI  = "💹 RSI & StochRSI"
+const string G_ADX  = "💪 ADX Trend Strength"
+const string G_VOL  = "📦 Volume"
+const string G_RISK = "⚡ Risk Management"
+const string G_MTF  = "🔭 Multi-Timeframe"
+const string G_FILT = "🔒 Filters"
+const string G_VIS  = "🎨 Visual"
+
+// ── EMA ─────────────────────────────────────────────────────────────────────
+int   emaFastLen  = input.int(21,  "Fast EMA",  group = G_EMA, minval = 5)
+int   emaSlowLen  = input.int(50,  "Slow EMA",  group = G_EMA, minval = 10)
+int   emaTrendLen = input.int(200, "Trend EMA", group = G_EMA, minval = 50,
+                     tooltip = "200-EMA primary trend filter.")
+
+// ── Keltner Channel ──────────────────────────────────────────────────────────
+int   kcLen  = input.int(20,    "KC Length",     group = G_KC, minval = 5)
+float kcMult = input.float(1.8, "KC Multiplier", group = G_KC, step = 0.1,
+                minval = 0.5, maxval = 6.0,
+                tooltip = "Higher = fewer, higher-quality signals.")
+
+// ── MACD ─────────────────────────────────────────────────────────────────────
+int macdFast = input.int(12, "Fast Length",   group = G_MACD, minval = 2)
+int macdSlow = input.int(26, "Slow Length",   group = G_MACD, minval = 5)
+int macdSig  = input.int(9,  "Signal Length", group = G_MACD, minval = 2)
+
+// ── RSI / StochRSI ───────────────────────────────────────────────────────────
+int rsiLen = input.int(14, "RSI Length",      group = G_RSI, minval = 2)
+int rsiMid = input.int(50, "RSI Midline",     group = G_RSI)
+int rsiOB  = input.int(70, "RSI Overbought",  group = G_RSI)
+int rsiOS  = input.int(30, "RSI Oversold",    group = G_RSI)
+int stLen  = input.int(14, "StochRSI Length", group = G_RSI, minval = 3)
+int stSmK  = input.int(3,  "Smooth %K",       group = G_RSI, minval = 1)
+int stSmD  = input.int(3,  "Smooth %D",       group = G_RSI, minval = 1)
+
+// ── ADX ──────────────────────────────────────────────────────────────────────
+int adxLen    = input.int(14, "ADX Length",    group = G_ADX, minval = 2)
+int adxMinVal = input.int(25, "ADX Threshold", group = G_ADX, minval = 10,
+                 tooltip = "ADX > threshold = trending. Below = ranging (no trades).")
+
+// ── Volume ───────────────────────────────────────────────────────────────────
+int   volLen  = input.int(20,    "Volume MA Length",  group = G_VOL, minval = 5)
+float volMult = input.float(1.3, "Volume Multiplier", group = G_VOL, step = 0.1, minval = 1.0)
+
+// ── Risk Management ──────────────────────────────────────────────────────────
+int   atrLen    = input.int(14,    "ATR Length",             group = G_RISK, minval = 1)
+float slMult    = input.float(1.5, "SL ATR Mult (fallback)", group = G_RISK, step = 0.1, minval = 0.3,
+                   tooltip = "Used when structural SL is too wide.")
+float tp1Mult   = input.float(1.5, "TP1 ATR Mult (50%)",    group = G_RISK, step = 0.1, minval = 0.5)
+float tp2Mult   = input.float(3.5, "TP2 ATR Mult (100%)",   group = G_RISK, step = 0.1, minval = 1.0)
+int   pivLR     = input.int(5,     "Pivot Lookback (SL)",   group = G_RISK, minval = 3)
+bool  useTrail  = input.bool(true, "Trailing Stop (post TP1)", group = G_RISK)
+float trailMult = input.float(1.2, "Trail ATR Mult",         group = G_RISK, step = 0.1, minval = 0.3)
+
+// ── Multi-Timeframe ──────────────────────────────────────────────────────────
+bool         useHTF = input.bool(true,       "Use HTF Filter", group = G_MTF)
+simple string htfTF  = input.timeframe("240", "HTF Timeframe",  group = G_MTF)
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+int    scoreTh    = input.int(75,    "Min Signal Score (0–100)", group = G_FILT, minval = 50, maxval = 100)
+bool   useAdxF    = input.bool(true, "ADX Trend Filter",         group = G_FILT)
+bool   useDivF    = input.bool(true, "Divergence Suppression",   group = G_FILT)
+bool   useSession = input.bool(false, "London/NY Session Only",  group = G_FILT)
+string tradeDir   = input.string("Both", "Trade Direction",
+                     options = ["Both", "Long Only", "Short Only"], group = G_FILT)
+
+// ── Visual ────────────────────────────────────────────────────────────────────
+bool showEMAs    = input.bool(true,  "Show EMAs",               group = G_VIS)
+bool showKC      = input.bool(true,  "Show Keltner Channel",    group = G_VIS)
+bool showTPSL    = input.bool(true,  "Show TP1 / TP2 / SL",    group = G_VIS)
+bool showScore   = input.bool(true,  "Show Signal Score %",     group = G_VIS)
+bool showStruct  = input.bool(true,  "Show Market Structure",   group = G_VIS)
+bool showDiv     = input.bool(true,  "Show Divergence Markers", group = G_VIS)
+bool showBarClr  = input.bool(true,  "Color Bars by Regime",   group = G_VIS)
+bool showBG      = input.bool(true,  "Trend Background",        group = G_VIS)
+bool showStats   = input.bool(true,  "Show Stats Table",        group = G_VIS)
+int  statsTrades = input.int(200,    "Trades in Stats Window",  group = G_VIS, minval = 10, maxval = 500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  INDICATOR CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+float atr      = ta.atr(atrLen)
+float emaFast  = ta.ema(close, emaFastLen)
+float emaSlow  = ta.ema(close, emaSlowLen)
+float emaTrend = ta.ema(close, emaTrendLen)
+
+float kcBasis  = ta.ema(close, kcLen)
+float kcUpper  = kcBasis + kcMult * atr
+float kcLower  = kcBasis - kcMult * atr
+
+[float macdLine, float sigLine, float macdHist] = ta.macd(close, macdFast, macdSlow, macdSig)
+
+float rsi    = ta.rsi(close, rsiLen)
+float _stoch = ta.stoch(rsi, rsi, rsi, stLen)
+float stochK = ta.sma(_stoch, stSmK)
+float stochD = ta.sma(stochK,  stSmD)
+
+[float diPlus, float diMinus, float adx] = ta.dmi(adxLen, adxLen)
+
+float volMA    = ta.sma(volume, volLen)
+bool  highVol   = volume > volMA * volMult
+bool  risingVol = volume > volume[1]
+
+// ── Trend States ─────────────────────────────────────────────────────────────
+bool bullTrend   = emaFast > emaSlow and emaSlow > emaTrend
+bool bearTrend   = emaFast < emaSlow and emaSlow < emaTrend
+bool trendStrong = adx > adxMinVal
+
+// ── HTF Trend ─────────────────────────────────────────────────────────────────
+[float htfF, float htfS] = request.security(syminfo.tickerid, htfTF,
+                             [ta.ema(close, emaFastLen), ta.ema(close, emaSlowLen)])
+bool htfBull = htfF > htfS
+bool htfBear = htfF < htfS
+
+// ── MACD ─────────────────────────────────────────────────────────────────────
+bool macdBull     = macdLine > sigLine and macdHist > 0
+bool macdBear     = macdLine < sigLine and macdHist < 0
+bool macdHistUp   = macdHist > macdHist[1]
+bool macdHistDown = macdHist < macdHist[1]
+
+// ── RSI ──────────────────────────────────────────────────────────────────────
+bool rsiBull    = rsi > rsiMid and rsi < rsiOB
+bool rsiBear    = rsi < rsiMid and rsi > rsiOS
+bool rsiRising  = rsi > rsi[2]
+bool rsiFalling = rsi < rsi[2]
+
+// ── StochRSI ─────────────────────────────────────────────────────────────────
+bool stochBull = stochK > stochD and stochK < 80
+bool stochBear = stochK < stochD and stochK > 20
+
+// ── Keltner Breakouts ─────────────────────────────────────────────────────────
+bool breakoutUp   = close > kcUpper and close[1] <= kcUpper[1]
+bool breakoutDown = close < kcLower and close[1] >= kcLower[1]
+
+// ── Session ───────────────────────────────────────────────────────────────────
+bool sessionOK = not useSession or
+                 (not na(time(timeframe.period, "0800-1700", "Europe/London")) or
+                  not na(time(timeframe.period, "0930-1600", "America/New_York")))
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MARKET STRUCTURE  —  HH / HL / LH / LL
+// ═══════════════════════════════════════════════════════════════════════════
+
+float pivH = ta.pivothigh(high, pivLR, pivLR)
+float pivL = ta.pivotlow(low,   pivLR, pivLR)
+
+var float pH1 = na
+var float pH2 = na
+var float pL1 = na
+var float pL2 = na
+
+if not na(pivH)
+    pH2 := pH1
+    pH1 := pivH
+
+if not na(pivL)
+    pL2 := pL1
+    pL1 := pivL
+
+bool bullStructure = not na(pH1) and not na(pH2) and not na(pL1) and not na(pL2)
+                      and pH1 > pH2 and pL1 > pL2
+bool bearStructure = not na(pH1) and not na(pH2) and not na(pL1) and not na(pL2)
+                      and pH1 < pH2 and pL1 < pL2
+
+// ── RSI Divergence ────────────────────────────────────────────────────────────
+var float rsiPH1 = na
+var float rsiPH2 = na
+var float rsiPL1 = na
+var float rsiPL2 = na
+
+if not na(pivH)
+    rsiPH2 := rsiPH1
+    rsiPH1 := rsi[pivLR]
+
+if not na(pivL)
+    rsiPL2 := rsiPL1
+    rsiPL1 := rsi[pivLR]
+
+bool bearDiv = not na(pH1)   and not na(pH2)   and not na(rsiPH1) and not na(rsiPH2)
+               and pH1 > pH2 and rsiPH1 < rsiPH2
+
+bool bullDiv = not na(pL1)   and not na(pL2)   and not na(rsiPL1) and not na(rsiPL2)
+               and pL1 < pL2 and rsiPL1 > rsiPL2
+
+bool noBearDiv = not useDivF or not bearDiv
+bool noBullDiv = not useDivF or not bullDiv
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SIGNAL SCORING V6  —  6 Tiers / 100 pts max  /  threshold ≥ 75
+// ═══════════════════════════════════════════════════════════════════════════
+//  T1  Trend Foundation   35 pts
+//  T2  Trend Strength     15 pts
+//  T3  MACD Momentum      15 pts
+//  T4  RSI + StochRSI     20 pts
+//  T5  Market Structure   10 pts
+//  T6  Volume              5 pts
+
+int bullScore = 0
+// T1
+bullScore := bullScore + (bullTrend                    ? 20 : 0)
+bullScore := bullScore + ((not useHTF or htfBull)      ? 15 : 0)
+// T2
+bullScore := bullScore + ((not useAdxF or trendStrong) ? 10 : 0)
+bullScore := bullScore + (diPlus > diMinus             ?  5 : 0)
+// T3
+bullScore := bullScore + (macdBull                     ? 10 : 0)
+bullScore := bullScore + (macdHistUp                   ?  5 : 0)
+// T4
+bullScore := bullScore + (rsiBull                      ? 10 : 0)
+bullScore := bullScore + (stochBull                    ?  7 : 0)
+bullScore := bullScore + (rsiRising                    ?  3 : 0)
+// T5
+bullScore := bullScore + (bullStructure                ?  7 : 0)
+bullScore := bullScore + (bullDiv                      ?  3 : 0)
+// T6
+bullScore := bullScore + (highVol                      ?  3 : 0)
+bullScore := bullScore + (risingVol                    ?  2 : 0)
+
+int bearScore = 0
+// T1
+bearScore := bearScore + (bearTrend                    ? 20 : 0)
+bearScore := bearScore + ((not useHTF or htfBear)      ? 15 : 0)
+// T2
+bearScore := bearScore + ((not useAdxF or trendStrong) ? 10 : 0)
+bearScore := bearScore + (diMinus > diPlus             ?  5 : 0)
+// T3
+bearScore := bearScore + (macdBear                     ? 10 : 0)
+bearScore := bearScore + (macdHistDown                 ?  5 : 0)
+// T4
+bearScore := bearScore + (rsiBear                      ? 10 : 0)
+bearScore := bearScore + (stochBear                    ?  7 : 0)
+bearScore := bearScore + (rsiFalling                   ?  3 : 0)
+// T5
+bearScore := bearScore + (bearStructure                ?  7 : 0)
+bearScore := bearScore + (bearDiv                      ?  3 : 0)
+// T6
+bearScore := bearScore + (highVol                      ?  3 : 0)
+bearScore := bearScore + (risingVol                    ?  2 : 0)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+bool canLong  = tradeDir != "Short Only"
+bool canShort = tradeDir != "Long Only"
+
+bool buySignal  = breakoutUp   and bullScore >= scoreTh
+                  and (not useAdxF or trendStrong)
+                  and noBearDiv and sessionOK and canLong
+
+bool sellSignal = breakoutDown and bearScore >= scoreTh
+                  and (not useAdxF or trendStrong)
+                  and noBullDiv and sessionOK and canShort
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DYNAMIC STOP LOSS  (Structural vs ATR — tighter wins)
+// ═══════════════════════════════════════════════════════════════════════════
+
+float atrSL_L    = close - slMult * atr
+float atrSL_S    = close + slMult * atr
+float structSL_L = not na(pL1) ? pL1 - atr * 0.2 : atrSL_L
+float structSL_S = not na(pH1) ? pH1 + atr * 0.2 : atrSL_S
+float finalSL_L  = math.max(atrSL_L, structSL_L)
+float finalSL_S  = math.min(atrSL_S, structSL_S)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  POSITION MANAGEMENT  —  TP1 50% → Breakeven SL → TP2 + Trail
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float slLevel  = na
+var float tp1Level = na
+var float tp2Level = na
+var float entPrice = na
+var int   entBar   = na
+var bool  tp1Hit   = false
+
+// Detect TP1 fill: position fell below 75% of the previous bar's size
+if strategy.position_size != 0
+    if math.abs(strategy.position_size) < math.abs(strategy.position_size[1]) * 0.75
+        if not tp1Hit
+            tp1Hit  := true
+            slLevel := entPrice     // ← SL moves to breakeven
+
+// ── New Long ─────────────────────────────────────────────────────────────────
+if buySignal
+    strategy.entry("Long", strategy.long, comment = "BUY V6")
+    entPrice := close
+    slLevel  := finalSL_L
+    tp1Level := close + tp1Mult * atr
+    tp2Level := close + tp2Mult * atr
+    entBar   := bar_index
+    tp1Hit   := false
+
+// ── New Short ─────────────────────────────────────────────────────────────────
+if sellSignal
+    strategy.entry("Short", strategy.short, comment = "SELL V6")
+    entPrice := close
+    slLevel  := finalSL_S
+    tp1Level := close - tp1Mult * atr
+    tp2Level := close - tp2Mult * atr
+    entBar   := bar_index
+    tp1Hit   := false
+
+// ── Exit — Long ───────────────────────────────────────────────────────────────
+if strategy.position_size > 0
+    strategy.exit("L-TP1", "Long",
+         qty_percent    = 50,
+         limit          = tp1Level,
+         comment_profit = "TP1 +50%")
+    if useTrail
+        strategy.exit("L-TP2", "Long",
+             qty_percent    = 100,
+             limit          = tp2Level,
+             stop           = slLevel,
+             trail_price    = tp1Level,
+             trail_offset   = math.round(trailMult * atr / syminfo.mintick),
+             comment_profit = "TP2",
+             comment_loss   = "Trail / BE-SL")
+    else
+        strategy.exit("L-TP2", "Long",
+             qty_percent    = 100,
+             limit          = tp2Level,
+             stop           = slLevel,
+             comment_profit = "TP2",
+             comment_loss   = "SL / BE")
+
+// ── Exit — Short ──────────────────────────────────────────────────────────────
+if strategy.position_size < 0
+    strategy.exit("S-TP1", "Short",
+         qty_percent    = 50,
+         limit          = tp1Level,
+         comment_profit = "TP1 +50%")
+    if useTrail
+        strategy.exit("S-TP2", "Short",
+             qty_percent    = 100,
+             limit          = tp2Level,
+             stop           = slLevel,
+             trail_price    = tp1Level,
+             trail_offset   = math.round(trailMult * atr / syminfo.mintick),
+             comment_profit = "TP2",
+             comment_loss   = "Trail / BE-SL")
+    else
+        strategy.exit("S-TP2", "Short",
+             qty_percent    = 100,
+             limit          = tp2Level,
+             stop           = slLevel,
+             comment_profit = "TP2",
+             comment_loss   = "SL / BE")
+
+// ── Reset when flat ───────────────────────────────────────────────────────────
+if strategy.position_size == 0
+    entPrice := na
+    tp1Hit   := false
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  VISUAL ELEMENTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Bar / Background colors ───────────────────────────────────────────────────
+color barC = switch
+    trendStrong and bullTrend => color.new(color.lime, 20)
+    trendStrong and bearTrend => color.new(color.red,  20)
+    =>                           color.new(color.gray, 45)
+barcolor(showBarClr ? barC : na, title = "Regime Bar")
+
+color bgC = switch
+    showBG and trendStrong and bullTrend => color.new(color.green, 96)
+    showBG and trendStrong and bearTrend => color.new(color.red,   96)
+    showBG and not trendStrong           => color.new(color.gray,  98)
+    =>                                     na
+bgcolor(bgC, title = "Regime BG")
+
+// ── EMAs ─────────────────────────────────────────────────────────────────────
+plot(showEMAs ? emaFast  : na, "EMA Fast",
+     color     = bullTrend ? color.yellow : color.new(color.yellow, 70),
+     linewidth = 2)
+plot(showEMAs ? emaSlow  : na, "EMA Slow",
+     color     = bullTrend ? color.new(color.orange, 25) : color.new(color.red, 25),
+     linewidth = 2)
+plot(showEMAs ? emaTrend : na, "EMA 200",
+     color     = color.new(color.white, 60),
+     linewidth = 1)
+
+// ── Keltner Channel ───────────────────────────────────────────────────────────
+kcU = plot(showKC ? kcUpper : na, "KC Upper", color = color.new(color.cyan, 40), linewidth = 1)
+kcL = plot(showKC ? kcLower : na, "KC Lower", color = color.new(color.cyan, 40), linewidth = 1)
+plot(showKC ? kcBasis : na, "KC Basis",
+     color = color.new(color.cyan, 75), linewidth = 1, style = plot.style_circles)
+fill(kcU, kcL, color = color.new(color.cyan, 92), title = "KC Fill")
+
+// ── Signal Labels ─────────────────────────────────────────────────────────────
+plotshape(buySignal,  title = "BUY V6",
+     style    = shape.labelup,   location = location.belowbar,
+     color    = color.lime,      textcolor = color.black,
+     text     = "V6 BUY",       size = size.normal)
+
+plotshape(sellSignal, title = "SELL V6",
+     style    = shape.labeldown, location = location.abovebar,
+     color    = color.red,       textcolor = color.white,
+     text     = "V6 SELL",      size = size.normal)
+
+// ── Signal Score Labels ───────────────────────────────────────────────────────
+if showScore and buySignal
+    label.new(bar_index, low - atr * 0.8,
+         text        = str.tostring(bullScore) + "%",
+         color       = color.new(color.lime, 10),
+         textcolor   = color.black,
+         style       = label.style_label_up,
+         size        = size.small)
+
+if showScore and sellSignal
+    label.new(bar_index, high + atr * 0.8,
+         text        = str.tostring(bearScore) + "%",
+         color       = color.new(color.red, 10),
+         textcolor   = color.white,
+         style       = label.style_label_down,
+         size        = size.small)
+
+// ── Market Structure Labels ───────────────────────────────────────────────────
+if showStruct and not na(pivH)
+    bool isHH = pH1 > nz(pH2, pH1)
+    label.new(bar_index - pivLR, pivH,
+         text      = isHH ? "HH" : "LH",
+         color     = isHH ? color.new(color.lime, 20) : color.new(color.orange, 20),
+         textcolor = color.white,
+         style     = label.style_label_down,
+         size      = size.tiny)
+
+if showStruct and not na(pivL)
+    bool isHL = pL1 > nz(pL2, pL1)
+    label.new(bar_index - pivLR, pivL,
+         text      = isHL ? "HL" : "LL",
+         color     = isHL ? color.new(color.lime, 20) : color.new(color.red, 20),
+         textcolor = color.white,
+         style     = label.style_label_up,
+         size      = size.tiny)
+
+// ── Divergence Markers ────────────────────────────────────────────────────────
+plotshape(showDiv and bearDiv, title = "Bear Div",
+     style = shape.xcross, location = location.abovebar,
+     color = color.new(color.orange, 0), size = size.tiny)
+plotshape(showDiv and bullDiv, title = "Bull Div",
+     style = shape.xcross, location = location.belowbar,
+     color = color.new(color.aqua, 0),   size = size.tiny)
+
+// ── TP1 / TP2 / SL / Entry Lines ──────────────────────────────────────────────
+var line  lnTP1 = na
+var line  lnTP2 = na
+var line  lnSL  = na
+var line  lnENT = na
+var label lbTP1 = na
+var label lbTP2 = na
+var label lbSL  = na
+var label lbENT = na
+
+if showTPSL
+    bool inTrade = strategy.position_size != 0
+
+    if inTrade and not na(slLevel) and not na(tp1Level) and not na(tp2Level)
+        line.delete(lnTP1)  ; line.delete(lnTP2)
+        line.delete(lnSL)   ; line.delete(lnENT)
+        label.delete(lbTP1) ; label.delete(lbTP2)
+        label.delete(lbSL)  ; label.delete(lbENT)
+
+        int s = na(entBar) ? bar_index : entBar
+        int e = bar_index + 40
+
+        // Entry
+        lnENT := line.new(s, entPrice, e, entPrice,
+             color = color.new(color.white, 15), style = line.style_solid, width = 1)
+        lbENT := label.new(e, entPrice,
+             text      = "ENTRY  " + str.tostring(entPrice, format.mintick),
+             color     = color.new(color.white, 15),
+             textcolor = color.black,
+             style     = label.style_label_left,
+             size      = size.tiny)
+
+        // TP1
+        lnTP1 := line.new(s, tp1Level, e, tp1Level,
+             color = color.new(color.lime, 35), style = line.style_dashed, width = 1)
+        lbTP1 := label.new(e, tp1Level,
+             text      = "TP1 (50%)  " + str.tostring(tp1Level, format.mintick),
+             color     = color.new(color.lime, 20),
+             textcolor = color.black,
+             style     = label.style_label_left,
+             size      = size.tiny)
+
+        // TP2
+        lnTP2 := line.new(s, tp2Level, e, tp2Level,
+             color = color.new(color.lime, 0), style = line.style_dashed, width = 2)
+        lbTP2 := label.new(e, tp2Level,
+             text      = "TP2 (100%)  " + str.tostring(tp2Level, format.mintick),
+             color     = color.new(color.lime, 5),
+             textcolor = color.black,
+             style     = label.style_label_left,
+             size      = size.small)
+
+        // SL / Breakeven
+        color slC   = tp1Hit ? color.new(color.orange, 0) : color.new(color.red, 0)
+        color slBgC = tp1Hit ? color.new(color.orange, 10) : color.new(color.red, 10)
+        string slTxt = (tp1Hit ? "BE-SL  " : "SL  ") + str.tostring(slLevel, format.mintick)
+        lnSL := line.new(s, slLevel, e, slLevel, color = slC, style = line.style_dashed, width = 2)
+        lbSL := label.new(e, slLevel,
+             text      = slTxt,
+             color     = slBgC,
+             textcolor = color.white,
+             style     = label.style_label_left,
+             size      = size.small)
+
+    if not inTrade
+        line.delete(lnTP1)  ; line.delete(lnTP2)
+        line.delete(lnSL)   ; line.delete(lnENT)
+        label.delete(lbTP1) ; label.delete(lbTP2)
+        label.delete(lbSL)  ; label.delete(lbENT)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  STATISTICS TABLE  —  Last N Trades
+// ═══════════════════════════════════════════════════════════════════════════
+
+var array<int>   tLog  = array.new<int>()
+var array<float> pLog  = array.new<float>()
+var int  prevC  = 0
+var int  maxWS  = 0
+var int  maxLS  = 0
+var int  curS   = 0
+var bool lastW  = false
+
+if strategy.closedtrades > prevC
+    int nc = strategy.closedtrades - prevC
+    for i = 0 to nc - 1
+        float p  = strategy.closedtrades.profit(strategy.closedtrades - nc + i)
+        bool  w  = p > 0
+        array.push(tLog, w ? 1 : 0)
+        array.push(pLog, p)
+        if array.size(tLog) > statsTrades
+            array.shift(tLog)
+            array.shift(pLog)
+        // Streak
+        curS  := w == lastW ? curS + 1 : 1
+        if w
+            maxWS := math.max(maxWS, curS)
+        else
+            maxLS := math.max(maxLS, curS)
+        lastW := w
+    prevC := strategy.closedtrades
+
+// Aggregate stats
+int   tot    = array.size(tLog)
+int   wins   = 0
+float gW     = 0.0
+float gL     = 0.0
+
+if tot > 0
+    for j = 0 to tot - 1
+        float p = array.get(pLog, j)
+        if array.get(tLog, j) == 1
+            wins += 1
+            gW   += p
+        else
+            gL   += math.abs(p)
+
+int   losses = tot - wins
+float winPct = tot > 0 ? (wins / tot) * 100.0 : 0.0
+float wlR    = losses > 0 ? wins / losses : wins > 0 ? 999.0 : 0.0
+float avgW   = wins   > 0 ? gW / wins   : 0.0
+float avgL   = losses > 0 ? gL / losses : 0.0
+float pf     = gL > 0 ? gW / gL : gW > 0 ? 999.0 : 0.0
+float rr     = tp2Mult / slMult
+float exp_   = (winPct / 100.0 * rr) - ((100.0 - winPct) / 100.0)
+
+string posStr = switch
+    strategy.position_size > 0 => "▲  LONG"
+    strategy.position_size < 0 => "▼  SHORT"
+    =>                            "─  FLAT"
+color posClr = switch
+    strategy.position_size > 0 => color.lime
+    strategy.position_size < 0 => color.red
+    =>                            color.gray
+
+string regStr = switch
+    trendStrong and bullTrend => "BULL TREND"
+    trendStrong and bearTrend => "BEAR TREND"
+    =>                           "RANGING"
+color regClr = switch
+    trendStrong and bullTrend => color.lime
+    trendStrong and bearTrend => color.red
+    =>                           color.gray
+
+if showStats
+    var table st = table.new(position.top_right, 2, 26,
+         bgcolor      = color.new(color.black, 78),
+         border_color = color.new(color.gray,  55),
+         border_width = 1,
+         frame_color  = color.new(color.cyan,  20),
+         frame_width  = 2)
+
+    // Header
+    table.cell(st, 0, 0, "⚡  BULLPOWER ALGO V6",
+         text_color = color.cyan, text_size = size.normal,
+         bgcolor = color.new(color.navy, 50), text_halign = text.align_center)
+    table.cell(st, 1, 0, "Deep Strategy | Pine v6",
+         text_color = color.new(color.cyan, 30), text_size = size.tiny,
+         bgcolor = color.new(color.navy, 50), text_halign = text.align_center)
+
+    // ── Trade Stats ───────────────────────────────────────────────────────────
+    table.cell(st, 0, 1, "[ LAST " + str.tostring(statsTrades) + " TRADES ]",
+         text_color = color.aqua, text_size = size.tiny,
+         bgcolor = color.new(color.navy, 65), text_halign = text.align_center)
+    table.cell(st, 1, 1, "", bgcolor = color.new(color.navy, 65))
+
+    table.cell(st, 0, 2, "Total Trades", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 2, str.tostring(tot), text_color = color.white, text_size = size.small)
+
+    table.cell(st, 0, 3, "✓  Wins", text_color = color.lime, text_size = size.small)
+    table.cell(st, 1, 3, str.tostring(wins), text_color = color.lime, text_size = size.small)
+
+    table.cell(st, 0, 4, "✗  Losses", text_color = color.red, text_size = size.small)
+    table.cell(st, 1, 4, str.tostring(losses), text_color = color.red, text_size = size.small)
+
+    color wrC = winPct >= 65 ? color.lime : winPct >= 50 ? color.yellow : color.red
+    table.cell(st, 0, 5, "Win Rate", text_color = color.yellow, text_size = size.small)
+    table.cell(st, 1, 5, str.tostring(winPct, "#.1") + "%", text_color = wrC, text_size = size.normal)
+
+    color wlC = wlR >= 2.0 ? color.lime : wlR >= 1.0 ? color.yellow : color.red
+    table.cell(st, 0, 6, "W/L Ratio", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 6, str.tostring(wlR, "#.##") + " : 1", text_color = wlC, text_size = size.small)
+
+    table.cell(st, 0, 7, "Avg Win",  text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 7, str.tostring(avgW, "#.##"), text_color = color.lime, text_size = size.small)
+
+    table.cell(st, 0, 8, "Avg Loss", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 8, str.tostring(avgL, "#.##"), text_color = color.red, text_size = size.small)
+
+    table.cell(st, 0, 9, "Max Win Streak",  text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 9, str.tostring(maxWS) + " in a row", text_color = color.lime, text_size = size.small)
+
+    table.cell(st, 0, 10, "Max Loss Streak", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 10, str.tostring(maxLS) + " in a row", text_color = color.red, text_size = size.small)
+
+    // ── Performance ───────────────────────────────────────────────────────────
+    table.cell(st, 0, 11, "─────────────", text_color = color.new(color.gray, 55), text_size = size.tiny)
+    table.cell(st, 1, 11, "─────────────", text_color = color.new(color.gray, 55), text_size = size.tiny)
+
+    table.cell(st, 0, 12, "[ PERFORMANCE ]",
+         text_color = color.aqua, text_size = size.tiny,
+         bgcolor = color.new(color.navy, 65), text_halign = text.align_center)
+    table.cell(st, 1, 12, "", bgcolor = color.new(color.navy, 65))
+
+    color pfC = pf >= 2.0 ? color.lime : pf >= 1.0 ? color.yellow : color.red
+    table.cell(st, 0, 13, "Profit Factor", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 13, str.tostring(pf, "#.##"), text_color = pfC, text_size = size.small)
+
+    table.cell(st, 0, 14, "Expectancy", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 14, str.tostring(exp_, "#.##") + " R",
+         text_color = exp_ > 0 ? color.lime : color.red, text_size = size.small)
+
+    table.cell(st, 0, 15, "Risk : Reward", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 15, "1 : " + str.tostring(rr, "#.#"), text_color = color.aqua, text_size = size.small)
+
+    table.cell(st, 0, 16, "Net P&L", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 16, str.tostring(strategy.netprofit, "#.##"),
+         text_color = strategy.netprofit >= 0 ? color.lime : color.red, text_size = size.small)
+
+    table.cell(st, 0, 17, "Open P&L", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 17, str.tostring(strategy.openprofit, "#.##"),
+         text_color = strategy.openprofit >= 0 ? color.lime : color.red, text_size = size.small)
+
+    table.cell(st, 0, 18, "Max Drawdown", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 18, str.tostring(strategy.max_drawdown, "#.##"),
+         text_color = color.red, text_size = size.small)
+
+    // ── Live Status ───────────────────────────────────────────────────────────
+    table.cell(st, 0, 19, "─────────────", text_color = color.new(color.gray, 55), text_size = size.tiny)
+    table.cell(st, 1, 19, "─────────────", text_color = color.new(color.gray, 55), text_size = size.tiny)
+
+    table.cell(st, 0, 20, "[ LIVE STATUS ]",
+         text_color = color.aqua, text_size = size.tiny,
+         bgcolor = color.new(color.navy, 65), text_halign = text.align_center)
+    table.cell(st, 1, 20, "", bgcolor = color.new(color.navy, 65))
+
+    table.cell(st, 0, 21, "Position", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 21, posStr, text_color = posClr, text_size = size.small)
+
+    table.cell(st, 0, 22, "TP1 Reached", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 22, tp1Hit ? "YES — BE active" : "No",
+         text_color = tp1Hit ? color.orange : color.gray, text_size = size.small)
+
+    table.cell(st, 0, 23, "Market Regime", text_color = color.silver, text_size = size.small)
+    table.cell(st, 1, 23, regStr + "  ADX: " + str.tostring(adx, "#.#"),
+         text_color = regClr, text_size = size.small)
+
+    table.cell(st, 0, 24, "Bull / Bear Score", text_color = color.silver, text_size = size.tiny)
+    table.cell(st, 1, 24,
+         str.tostring(bullScore) + " / " + str.tostring(bearScore),
+         text_color = bullScore > bearScore ? color.lime : color.red, text_size = size.small)
+
+    table.cell(st, 0, 25, "ADX / DI+  DI−", text_color = color.silver, text_size = size.tiny)
+    table.cell(st, 1, 25,
+         str.tostring(adx, "#.#") + "  /  " +
+         str.tostring(diPlus, "#.#") + "  " + str.tostring(diMinus, "#.#"),
+         text_color = trendStrong ? color.yellow : color.gray, text_size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ALERT CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+alertcondition(buySignal,
+     title   = "V6 BUY Signal",
+     message = "BullPower V6 — BUY | {{ticker}} {{interval}}")
+
+alertcondition(sellSignal,
+     title   = "V6 SELL Signal",
+     message = "BullPower V6 — SELL | {{ticker}} {{interval}}")
+
+alertcondition(tp1Hit and strategy.position_size != 0,
+     title   = "V6 TP1 Hit — Breakeven Active",
+     message = "BullPower V6 — TP1 Hit! SL → Breakeven | {{ticker}}")
+
+alertcondition(buySignal or sellSignal,
+     title   = "V6 Any Signal",
+     message = "BullPower V6 — Signal | {{ticker}} {{interval}}")
